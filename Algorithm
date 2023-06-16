@@ -1,0 +1,165 @@
+import numpy as np
+from sklearn.cluster import KMeans
+from nltk.corpus import wordnet
+import nltk
+import pickle
+import os
+
+
+nltk.download('wordnet')
+nltk.download('averaged_perceptron_tagger')
+nltk.download('punkt')
+q_table_file = "q_table.pkl"
+load_saved_q_table = True
+
+if load_saved_q_table:
+    if os.path.exists(q_table_file):
+        try:
+            with open(q_table_file, "rb") as f:
+                Q = pickle.load(f)
+                print("Q-table loaded successfully.")
+        except (FileNotFoundError, EOFError):
+            print("Invalid or empty Q-table file. Starting from scratch.")
+    else:
+        print("No saved Q-table found. Starting from scratch.")
+else:
+    print("Starting with a new Q-table.")
+
+
+# Function to evaluate the quality of a sentence
+
+def evaluate_sentence(sentence):
+    tokens = nltk.word_tokenize(sentence)
+    tagged_tokens = nltk.pos_tag(tokens)
+    noun_count = sum(1 for _, tag in tagged_tokens if tag.startswith('NN'))
+
+    if noun_count == 0:
+        return 0  # Penalize sentences with no nouns
+
+    total_similarity = 0
+    word_count = 0
+
+    for token, _ in tagged_tokens:
+        synsets = wordnet.synsets(token)
+        if synsets:
+            word_count += 1
+            word_similarity = max(synset.path_similarity(synsets[0]) for synset in synsets)
+            total_similarity += word_similarity
+
+    if word_count > 0:
+        average_similarity = total_similarity / word_count
+        return average_similarity
+    else:
+        return 0  # Penalize sentences with no valid words
+
+
+# Reinforcement learning using Q-learning
+num_letters = 26  # Number of letters in the English alphabet
+num_actions = num_letters + 1  # Number of possible actions: 26 letters + 1 for ending a word/sentence
+
+max_sentence_length = 10  # Maximum number of words in a generated sentence
+max_num_characters = 100  # Maximum number of characters in a generated sentence
+
+# Initialize the Q-table
+Q = np.zeros((num_letters, num_actions))
+
+# Define the learning parameters
+learning_rate = 1
+discount_factor = 0.9
+num_episodes = 1000
+
+# Q-learning algorithm
+for episode in range(num_episodes):
+    state = np.random.randint(0, num_letters)
+
+    word = ""
+    sentence = ""
+
+    while True:
+        # Choose an action based on the Q-table (e.g., epsilon-greedy exploration)
+        if np.random.rand() < 0.2:
+            action = np.random.randint(0, num_actions)
+        else:
+            action = np.argmax(Q[state, :])
+
+        if action < num_letters:
+            letter = chr(ord('a') + action)
+            word += letter
+            sentence += letter
+
+            if wordnet.synsets(word):
+                # Reward for forming a valid word
+                reward = 1
+            else:
+                reward = 0
+
+        else:
+            # Action to end the word/sentence
+            if wordnet.synsets(word):
+                # Reward for forming a valid word
+                reward = 1
+            else:
+                # Reward for completing a sentence with meaningful content
+                reward = evaluate_sentence(sentence)
+
+            # Additional rewards or penalties
+            if sentence.strip():
+                diversity_reward = len(set(sentence.split())) / len(sentence.split())  # Reward for diversity
+            else:
+                diversity_reward = 0
+
+            coherence_reward = evaluate_sentence(sentence)  # Coherence reward based on the sentence quality score
+
+            # Adjust the weights to balance the importance of rewards
+            reward += 0.2 * diversity_reward + 0.8 * coherence_reward
+
+            break
+
+        # Update the Q-table using the Q-learning equation
+        Q[state, action] = (1 - learning_rate) * Q[state, action] + learning_rate * (
+                reward + discount_factor * np.max(Q[action, :]))
+
+        state = action
+
+# Save the Q-table after training
+
+
+# Testing the learned policy
+current_state = np.random.randint(0, num_letters)
+word = ""
+generated_sentence = ""
+
+while True:
+    action = np.argmax(Q[current_state, :])
+
+    if action < num_letters:
+        letter = chr(ord('a') + action)
+        word += letter
+        generated_sentence += letter
+    else:
+        generated_sentence += " "
+
+        if wordnet.synsets(word):
+            synset = wordnet.synsets(word)[0]
+            definition = synset.definition()
+            generated_sentence += definition
+        else:
+            generated_sentence += word
+
+        word = ""
+
+    if len(generated_sentence.split()) >= max_sentence_length or len(generated_sentence) >= max_num_characters:
+        break
+
+    current_state = action
+
+print("Generated Sentence:")
+print(generated_sentence)
+
+sentence_quality_score = evaluate_sentence(generated_sentence)
+print("Sentence Quality Score:", sentence_quality_score)
+
+q_table_file = "q_table.pkl"
+with open(q_table_file, "wb") as f:
+    pickle.dump(Q, f)
+    print("Q-table saved successfully.")
