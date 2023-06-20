@@ -1,165 +1,206 @@
-import numpy as np
-from sklearn.cluster import KMeans
-from nltk.corpus import wordnet
-import nltk
-import pickle
 import os
+import numpy as np
+import tensorflow as tf
+from tensorflow import keras
+import matplotlib.pyplot as plt
+from collections import deque
+import random
+from nltk.corpus import wordnet
+from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
+
+# Set the seed for reproducibility
+np.random.seed(0)
+tf.random.set_seed(0)
 
 
-nltk.download('wordnet')
-nltk.download('averaged_perceptron_tagger')
-nltk.download('punkt')
-q_table_file = "q_table.pkl"
-load_saved_q_table = True
+class WordGenerator:
+    def __init__(self):
+        self.words = set()
+        self.definitions = {}
 
-if load_saved_q_table:
-    if os.path.exists(q_table_file):
-        try:
-            with open(q_table_file, "rb") as f:
-                Q = pickle.load(f)
-                print("Q-table loaded successfully.")
-        except (FileNotFoundError, EOFError):
-            print("Invalid or empty Q-table file. Starting from scratch.")
-    else:
-        print("No saved Q-table found. Starting from scratch.")
-else:
-    print("Starting with a new Q-table.")
+    def generate_word(self):
+        while True:
+            word = ''.join(random.choice('abcdefghijklmnopqrstuvwxyz') for _ in range(5))
+            if word not in self.words:
+                self.words.add(word)
+                return word
+
+    def generate_definition(self, word):
+        synsets = wordnet.synsets(word)
+        if synsets:
+            definition = synsets[0].definition()
+        else:
+            definition = "Definition not available"
+        self.definitions[word] = definition
+        return definition
+
+    def save_word_library(self, path):
+        with open(path, 'w') as file:
+            for word in self.words:
+                file.write(word + '\n')
+
+    def save_definition_dictionary(self, path):
+        with open(path, 'w') as file:
+            for word, definition in self.definitions.items():
+                file.write(f"{word}: {definition}\n")
 
 
-# Function to evaluate the quality of a sentence
+class QNetwork:
+    def __init__(self, state_size, action_size):
+        self.state_size = state_size
+        self.action_size = action_size
+        self.memory = deque(maxlen=10000)
+        self.gamma = 0.95  # Discount factor
+        self.epsilon = 1.0  # Exploration rate
+        self.epsilon_decay = 0.995
+        self.epsilon_min = 0.01
+        self.learning_rate = 0.001
+        self.model = self.build_model()
+
+    def build_model(self):
+        model = keras.Sequential()
+        model.add(keras.layers.Dense(128, input_dim=self.state_size, activation='relu'))
+        model.add(keras.layers.Dense(128, activation='relu'))
+        model.add(keras.layers.Dense(self.action_size, activation='linear'))
+        model.compile(loss='mse', optimizer=keras.optimizers.Adam(learning_rate=self.learning_rate))
+        return model
+
+    def remember(self, state, action, reward, next_state, done):
+        self.memory.append((state, action, reward, next_state, done))
+
+    def act(self, state):
+        if np.random.rand() <= self.epsilon:
+            return random.randrange(self.action_size)
+        q_values = self.model.predict(state)
+        return np.argmax(q_values[0])
+
+    def replay(self, batch_size):
+        if len(self.memory) < batch_size:
+            return
+        minibatch = random.sample(self.memory, batch_size)
+        for state, action, reward, next_state, done in minibatch:
+            target = reward
+            if not done:
+                target = (reward + self.gamma * np.amax(self.model.predict(next_state)[0]))
+            target_f = self.model.predict(state)
+            target_f[0][action] = target
+            self.model.fit(state, target_f, epochs=1, verbose=0)
+
+    def update_epsilon(self):
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+
+    def save_weights(self, path):
+        self.model.save_weights(path)
+
+    def load_weights(self, path):
+        self.model.load_weights(path)
+
 
 def evaluate_sentence(sentence):
-    tokens = nltk.word_tokenize(sentence)
-    tagged_tokens = nltk.pos_tag(tokens)
-    noun_count = sum(1 for _, tag in tagged_tokens if tag.startswith('NN'))
-
-    if noun_count == 0:
-        return 0  # Penalize sentences with no nouns
-
-    total_similarity = 0
-    word_count = 0
-
-    for token, _ in tagged_tokens:
-        synsets = wordnet.synsets(token)
-        if synsets:
-            word_count += 1
-            word_similarity = max(synset.path_similarity(synsets[0]) for synset in synsets)
-            total_similarity += word_similarity
-
-    if word_count > 0:
-        average_similarity = total_similarity / word_count
-        return average_similarity
-    else:
-        return 0  # Penalize sentences with no valid words
+    preprocessed_sentence = preprocess_sentence(sentence)
+    words = word_tokenize(preprocessed_sentence)
+    valid_words = []
+    for word in words:
+        lemma = WordNetLemmatizer().lemmatize(word.lower())
+        if lemma in word_generator.words:
+            valid_words.append(lemma)
+    return valid_words
 
 
-# Reinforcement learning using Q-learning
-num_letters = 26  # Number of letters in the English alphabet
-num_actions = num_letters + 1  # Number of possible actions: 26 letters + 1 for ending a word/sentence
+def preprocess_sentence(sentence):
+    lemmatizer = WordNetLemmatizer()
+    words = word_tokenize(sentence)
+    lemmatized_words = [lemmatizer.lemmatize(word.lower()) for word in words]
+    return ' '.join(lemmatized_words)
 
-max_sentence_length = 10  # Maximum number of words in a generated sentence
-max_num_characters = 100  # Maximum number of characters in a generated sentence
 
-# Initialize the Q-table
-Q = np.zeros((num_letters, num_actions))
+def train_model(num_episodes, batch_size):
+    state_size = len(word_generator.words)
+    action_size = len(word_generator.words)
+    q_network = QNetwork(state_size, action_size)
+    episode_accuracy = []
+    episode_positive_rewards = []
+    episode_negative_rewards = []
 
-# Define the learning parameters
-learning_rate = 1
-discount_factor = 0.9
-num_episodes = 1000
+    for episode in range(1, num_episodes + 1):
+        word = random.choice(list(word_generator.words))
+        definition = word_generator.generate_definition(word)
+        state = np.zeros((1, state_size))
+        index = list(word_generator.words).index(word)
+        state[0][index] = 1
+        total_reward = 0
+        total_positive_reward = 0
+        total_negative_reward = 0
+        done = False
 
-# Q-learning algorithm
-for episode in range(num_episodes):
-    state = np.random.randint(0, num_letters)
-
-    word = ""
-    sentence = ""
-
-    while True:
-        # Choose an action based on the Q-table (e.g., epsilon-greedy exploration)
-        if np.random.rand() < 0.2:
-            action = np.random.randint(0, num_actions)
-        else:
-            action = np.argmax(Q[state, :])
-
-        if action < num_letters:
-            letter = chr(ord('a') + action)
-            word += letter
-            sentence += letter
-
-            if wordnet.synsets(word):
-                # Reward for forming a valid word
-                reward = 1
+        while not done:
+            action = q_network.act(state)
+            next_state = np.zeros((1, state_size))
+            next_state[0][action] = 1
+            reward = 1 if evaluate_word(word, q_network, word_generator) == list(word_generator.words)[action] else -1
+            total_reward += reward
+            if reward > 0:
+                total_positive_reward += reward
             else:
-                reward = 0
+                total_negative_reward += reward
+            q_network.remember(state, action, reward, next_state, done)
+            state = next_state
 
-        else:
-            # Action to end the word/sentence
-            if wordnet.synsets(word):
-                # Reward for forming a valid word
-                reward = 1
-            else:
-                # Reward for completing a sentence with meaningful content
-                reward = evaluate_sentence(sentence)
+        q_network.replay(batch_size)
+        q_network.update_epsilon()
 
-            # Additional rewards or penalties
-            if sentence.strip():
-                diversity_reward = len(set(sentence.split())) / len(sentence.split())  # Reward for diversity
-            else:
-                diversity_reward = 0
+        episode_accuracy.append(total_reward)
+        episode_positive_rewards.append(total_positive_reward)
+        episode_negative_rewards.append(total_negative_reward)
 
-            coherence_reward = evaluate_sentence(sentence)  # Coherence reward based on the sentence quality score
+        print(f"Episode: {episode}/{num_episodes} Accuracy: {total_reward / len(word) * 100:.2f}%")
+        print(f"Word: {word}, Definition: {definition}")
+        print()
 
-            # Adjust the weights to balance the importance of rewards
-            reward += 0.2 * diversity_reward + 0.8 * coherence_reward
+    print("Training complete.\n")
 
-            break
+    # Display learned words and their meanings
+    print("Learned Words and Meanings:")
+    for word in word_generator.words:
+        print(f"Word: {word}, Definition: {word_generator.definitions.get(word, 'Definition not available')}")
+    print()
 
-        # Update the Q-table using the Q-learning equation
-        Q[state, action] = (1 - learning_rate) * Q[state, action] + learning_rate * (
-                reward + discount_factor * np.max(Q[action, :]))
+    # Save the learned words and definitions
+    word_generator.save_word_library("learned_words.txt")
+    word_generator.save_definition_dictionary("learned_definitions.txt")
 
-        state = action
+    # Save the Q-network weights
+    q_network.save_weights("q_network_weights.h5")
 
-# Save the Q-table after training
+    # Plot episode accuracy
+    plt.plot(episode_accuracy)
+    plt.xlabel("Episode")
+    plt.ylabel("Accuracy")
+    plt.title("Episode Accuracy")
+    plt.show()
+
+    # Display total positive and negative rewards
+    print(f"Total Positive Rewards: {sum(episode_positive_rewards)}")
+    print(f"Total Negative Rewards: {sum(episode_negative_rewards)}")
 
 
-# Testing the learned policy
-current_state = np.random.randint(0, num_letters)
-word = ""
-generated_sentence = ""
+def evaluate_word(word, q_network, word_generator):
+    state = np.zeros((1, len(word_generator.words)))
+    index = list(word_generator.words).index(word)
+    state[0][index] = 1
+    action = q_network.act(state)
+    return list(word_generator.words)[action]
 
-while True:
-    action = np.argmax(Q[current_state, :])
 
-    if action < num_letters:
-        letter = chr(ord('a') + action)
-        word += letter
-        generated_sentence += letter
-    else:
-        generated_sentence += " "
+# Create WordGenerator instance
+word_generator = WordGenerator()
 
-        if wordnet.synsets(word):
-            synset = wordnet.synsets(word)[0]
-            definition = synset.definition()
-            generated_sentence += definition
-        else:
-            generated_sentence += word
+# Generate words and definitions
+for _ in range(1000):
+    word = word_generator.generate_word()
+    word_generator.generate_definition(word)
 
-        word = ""
-
-    if len(generated_sentence.split()) >= max_sentence_length or len(generated_sentence) >= max_num_characters:
-        break
-
-    current_state = action
-
-print("Generated Sentence:")
-print(generated_sentence)
-
-sentence_quality_score = evaluate_sentence(generated_sentence)
-print("Sentence Quality Score:", sentence_quality_score)
-
-q_table_file = "q_table.pkl"
-with open(q_table_file, "wb") as f:
-    pickle.dump(Q, f)
-    print("Q-table saved successfully.")
+# Perform training
+train_model(num_episodes=10, batch_size=32)
